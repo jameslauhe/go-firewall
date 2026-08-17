@@ -14,6 +14,7 @@ import (
 	mw "github.com/jameslauhe/go-firewall/internal/middleware"
 	"github.com/jameslauhe/go-firewall/internal/middleware/ipfilter"
 	"github.com/jameslauhe/go-firewall/internal/middleware/ratelimit"
+	"github.com/jameslauhe/go-firewall/internal/middleware/waf"
 	"github.com/jameslauhe/go-firewall/internal/proxy"
 	"github.com/jameslauhe/go-firewall/internal/server"
 	"github.com/jameslauhe/go-firewall/internal/version"
@@ -52,11 +53,17 @@ func run(cfg *config.Config) error {
 	rateLimiter := ratelimit.New(cfg.RateLimit)
 	defer rateLimiter.Stop()
 
-	handler := mw.Chain(p.Handler(),
-		mw.AttachRecorder,
-		ipFilter.Middleware(),
-		rateLimiter.Middleware(),
-	)
+	mws := []mw.Middleware{mw.AttachRecorder, ipFilter.Middleware(), rateLimiter.Middleware()}
+
+	if cfg.WAF.Enabled {
+		wafEngine, err := waf.NewEngine(cfg.WAF)
+		if err != nil {
+			return err
+		}
+		mws = append(mws, wafEngine.Middleware())
+	}
+
+	handler := mw.Chain(p.Handler(), mws...)
 
 	srv, err := server.New(cfg.Listen, handler)
 	if err != nil {

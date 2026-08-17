@@ -1,0 +1,150 @@
+# go-firewall default WAF rule set (v1 seed).
+#
+# This is a small, high-confidence starting point covering the most common
+# attack classes — not a full OWASP Core Rule Set port. Favor precision
+# over recall: extend this file for your application's specific needs
+# rather than expecting it to catch everything out of the box.
+#
+# action: block | log (log-only rules are evaluated and logged for tuning
+# visibility but never block a request).
+
+rules:
+  # --- SQL injection ---------------------------------------------------
+  - id: 942100
+    category: sqli
+    severity: critical
+    action: block
+    description: "SQL injection - UNION SELECT"
+    targets: [query, body]
+    pattern: '(?i)\bunion\b\s+(\ball\b\s+)?\bselect\b'
+
+  - id: 942110
+    category: sqli
+    severity: critical
+    action: block
+    description: "SQL injection - tautology (OR 1=1 style)"
+    targets: [query, body]
+    pattern: "(?i)\\bor\\b\\s+['\"]?\\d+['\"]?\\s*=\\s*['\"]?\\d+['\"]?"
+
+  - id: 942120
+    category: sqli
+    severity: high
+    action: block
+    description: "SQL injection - comment injection sequence"
+    targets: [query, body]
+    pattern: '(--|#|/\*)'
+
+  - id: 942130
+    category: sqli
+    severity: critical
+    action: block
+    description: "SQL injection - stacked query"
+    targets: [query, body]
+    pattern: '(?i);\s*(drop|delete|insert|update)\b'
+
+  - id: 942140
+    category: sqli
+    severity: high
+    action: block
+    description: "SQL injection - time-based blind (sleep/benchmark)"
+    targets: [query, body]
+    pattern: '(?i)\b(sleep|benchmark)\s*\('
+
+  # --- Cross-site scripting ---------------------------------------------
+  - id: 941100
+    category: xss
+    severity: high
+    action: block
+    description: "XSS - script tag"
+    targets: [query, body, "headers:User-Agent", "headers:Referer"]
+    pattern: '(?i)<script[\s>]'
+
+  - id: 941110
+    category: xss
+    severity: high
+    action: block
+    description: "XSS - javascript: URI"
+    targets: [query, body]
+    pattern: '(?i)javascript:'
+
+  - id: 941120
+    category: xss
+    severity: high
+    action: block
+    description: "XSS - inline event handler injection"
+    targets: [query, body]
+    pattern: '(?i)on(error|load|click|mouseover|focus)\s*='
+
+  - id: 941130
+    category: xss
+    severity: medium
+    action: block
+    description: "XSS - iframe injection"
+    targets: [query, body]
+    pattern: '(?i)<iframe[\s>]'
+
+  - id: 941140
+    category: xss
+    severity: medium
+    action: block
+    description: "XSS - svg vector"
+    targets: [query, body]
+    pattern: '(?i)<svg[\s>]'
+
+  # --- Path traversal -----------------------------------------------------
+  - id: 930100
+    category: path-traversal
+    severity: high
+    action: block
+    description: "Path traversal - dot-dot-slash"
+    targets: [path, query]
+    pattern: '(\.\./|\.\.\\)'
+
+  - id: 930110
+    category: path-traversal
+    severity: high
+    action: block
+    description: "Path traversal - URL-encoded dot-dot-slash"
+    targets: [path, query]
+    pattern: '(?i)%2e%2e(%2f|%5c|/)'
+
+  - id: 930120
+    category: path-traversal
+    severity: medium
+    action: block
+    description: "Path traversal - null byte injection"
+    targets: [path, query]
+    pattern: '%00'
+
+  # --- Command injection --------------------------------------------------
+  - id: 932100
+    category: command-injection
+    severity: critical
+    action: block
+    description: "Command injection - shell metacharacter with common binary"
+    targets: [query, body]
+    pattern: '(?i)[;&|`]\s*(cat|wget|curl|nc|bash|sh|python|perl|ls|whoami|id)\b'
+
+  - id: 932110
+    category: command-injection
+    severity: critical
+    action: block
+    description: "Command injection - $() command substitution"
+    targets: [query, body]
+    pattern: '\$\([^)]*\)'
+
+  - id: 932120
+    category: command-injection
+    severity: critical
+    action: block
+    description: "Command injection - backtick command substitution"
+    targets: [query, body]
+    pattern: '`[^`]*`'
+
+  - id: 932130
+    category: command-injection
+    severity: high
+    action: block
+    description: "Command injection - netcat reverse shell"
+    targets: [query, body]
+    pattern: '(?i)\b(nc|netcat)\s+-e\b'
