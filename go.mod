@@ -5,6 +5,7 @@ go 1.24.7
 require (
 	github.com/maxmind/mmdbwriter v1.2.0
 	github.com/oschwald/maxminddb-golang v1.12.0
+	golang.org/x/time v0.9.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

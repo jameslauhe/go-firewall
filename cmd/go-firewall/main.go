@@ -13,6 +13,7 @@ import (
 	"github.com/jameslauhe/go-firewall/internal/config"
 	mw "github.com/jameslauhe/go-firewall/internal/middleware"
 	"github.com/jameslauhe/go-firewall/internal/middleware/ipfilter"
+	"github.com/jameslauhe/go-firewall/internal/middleware/ratelimit"
 	"github.com/jameslauhe/go-firewall/internal/proxy"
 	"github.com/jameslauhe/go-firewall/internal/server"
 	"github.com/jameslauhe/go-firewall/internal/version"
@@ -48,9 +49,13 @@ func run(cfg *config.Config) error {
 	}
 	defer ipFilter.Close()
 
+	rateLimiter := ratelimit.New(cfg.RateLimit)
+	defer rateLimiter.Stop()
+
 	handler := mw.Chain(p.Handler(),
 		mw.AttachRecorder,
 		ipFilter.Middleware(),
+		rateLimiter.Middleware(),
 	)
 
 	srv, err := server.New(cfg.Listen, handler)
