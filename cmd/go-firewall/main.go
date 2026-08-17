@@ -45,6 +45,9 @@ func main() {
 func run(cfg *config.Config) error {
 	slog.Info("starting go-firewall", "version", version.Version, "commit", version.Commit)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	p, err := proxy.New(cfg.Upstreams)
 	if err != nil {
 		return err
@@ -82,6 +85,7 @@ func run(cfg *config.Config) error {
 			return err
 		}
 		mws = append(mws, wafEngine.Middleware())
+		go watchForReload(ctx, wafEngine, cfg.WAF.RulesFile)
 	}
 
 	handler := mw.Chain(p.Handler(), mws...)
@@ -125,12 +129,13 @@ func run(cfg *config.Config) error {
 		}()
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Start()
+	}()
+	go func() {
+		<-srv.Ready()
+		slog.Info("listening", "addrs", srv.Addrs())
 	}()
 
 	select {
@@ -150,5 +155,27 @@ func run(cfg *config.Config) error {
 		return nil
 	case err := <-errCh:
 		return err
+	}
+}
+
+// watchForReload reloads the WAF ruleset from path on SIGHUP, until ctx is
+// canceled. A failed reload logs and keeps the previous ruleset serving —
+// see waf.Engine.Reload.
+func watchForReload(ctx context.Context, engine *waf.Engine, path string) {
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	defer signal.Stop(sighup)
+
+	for {
+		select {
+		case <-sighup:
+			if err := engine.Reload(path); err != nil {
+				slog.Error("waf rule reload failed, keeping previous ruleset", "error", err)
+				continue
+			}
+			slog.Info("waf ruleset reloaded", "rule_count", engine.RuleCount())
+		case <-ctx.Done():
+			return
+		}
 	}
 }

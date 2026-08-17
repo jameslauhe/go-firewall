@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/jameslauhe/go-firewall/internal/config"
@@ -14,7 +15,9 @@ import (
 
 // Server owns one *http.Server per configured listener.
 type Server struct {
-	servers []*http.Server
+	servers   []*http.Server
+	listeners []net.Listener
+	ready     chan struct{}
 }
 
 func New(listeners []config.ListenConfig, handler http.Handler) (*Server, error) {
@@ -22,7 +25,7 @@ func New(listeners []config.ListenConfig, handler http.Handler) (*Server, error)
 		return nil, fmt.Errorf("server: at least one listener is required")
 	}
 
-	s := &Server{}
+	s := &Server{ready: make(chan struct{})}
 	for _, l := range listeners {
 		hs := &http.Server{
 			Addr:    l.Address,
@@ -44,19 +47,51 @@ func New(listeners []config.ListenConfig, handler http.Handler) (*Server, error)
 	return s, nil
 }
 
-// Start binds and serves every listener. It blocks until the first
-// listener returns a non-shutdown error, or returns nil once all listeners
-// have been cleanly shut down via Shutdown.
+// Ready is closed once every listener has bound its socket (before Start
+// begins serving), so callers using an ephemeral port (":0") know when
+// Addrs() is safe to read.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
+}
+
+// Addrs returns each listener's actual bound address, in listener order.
+// Only meaningful after Ready() is closed.
+func (s *Server) Addrs() []string {
+	addrs := make([]string, len(s.listeners))
+	for i, ln := range s.listeners {
+		addrs[i] = ln.Addr().String()
+	}
+	return addrs
+}
+
+// Start binds every listener, then serves them until Shutdown is called or
+// one returns a non-shutdown error.
 func (s *Server) Start() error {
-	errCh := make(chan error, len(s.servers))
 	for _, hs := range s.servers {
-		hs := hs
+		ln, err := net.Listen("tcp", hs.Addr)
+		if err != nil {
+			return fmt.Errorf("server: listen on %s: %w", hs.Addr, err)
+		}
+		s.listeners = append(s.listeners, ln)
+	}
+	close(s.ready)
+
+	errCh := make(chan error, len(s.servers))
+	for i, hs := range s.servers {
+		hs, ln := hs, s.listeners[i]
 		go func() {
 			var err error
 			if hs.TLSConfig != nil {
-				err = hs.ListenAndServeTLS("", "")
+				// ServeTLS (not a manually tls.NewListener-wrapped
+				// Serve) is required for Go's http.Server to wire up
+				// its automatic HTTP/2 support — that wiring happens
+				// inside ServeTLS/ListenAndServeTLS specifically, not
+				// for a plain Serve() over an already-TLS listener.
+				// Cert/key are already loaded into hs.TLSConfig, so no
+				// file paths are needed here.
+				err = hs.ServeTLS(ln, "", "")
 			} else {
-				err = hs.ListenAndServe()
+				err = hs.Serve(ln)
 			}
 			if errors.Is(err, http.ErrServerClosed) {
 				err = nil
