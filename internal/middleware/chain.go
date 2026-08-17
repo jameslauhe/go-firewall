@@ -5,6 +5,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"sync"
 )
@@ -114,4 +116,23 @@ func WithRecorder(ctx context.Context, rec *Recorder) context.Context {
 func RecorderFrom(ctx context.Context) (*Recorder, bool) {
 	rec, ok := ctx.Value(recorderCtxKey{}).(*Recorder)
 	return rec, ok
+}
+
+// AttachRecorder creates a fresh Recorder for each request and stores it in
+// the request context so downstream middlewares can report outcomes. It
+// must be the outermost middleware in the chain. The access-log middleware
+// (internal/log) additionally reads the Recorder's snapshot after
+// next.ServeHTTP returns to emit the request's log line.
+func AttachRecorder(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := NewRecorder(newRequestID())
+		ctx := WithRecorder(r.Context(), rec)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func newRequestID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

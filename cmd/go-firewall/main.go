@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"github.com/jameslauhe/go-firewall/internal/config"
+	mw "github.com/jameslauhe/go-firewall/internal/middleware"
+	"github.com/jameslauhe/go-firewall/internal/middleware/ipfilter"
 	"github.com/jameslauhe/go-firewall/internal/proxy"
 	"github.com/jameslauhe/go-firewall/internal/server"
 	"github.com/jameslauhe/go-firewall/internal/version"
@@ -40,7 +42,18 @@ func run(cfg *config.Config) error {
 		return err
 	}
 
-	srv, err := server.New(cfg.Listen, p.Handler())
+	ipFilter, err := ipfilter.New(cfg.IPLists)
+	if err != nil {
+		return err
+	}
+	defer ipFilter.Close()
+
+	handler := mw.Chain(p.Handler(),
+		mw.AttachRecorder,
+		ipFilter.Middleware(),
+	)
+
+	srv, err := server.New(cfg.Listen, handler)
 	if err != nil {
 		return err
 	}

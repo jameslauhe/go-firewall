@@ -74,7 +74,7 @@ type RateLimitRule struct {
 }
 
 type RouteRateLimit struct {
-	PathPrefix string `yaml:"path_prefix"`
+	PathPrefix    string `yaml:"path_prefix"`
 	RateLimitRule `yaml:",inline"`
 }
 
