@@ -4,13 +4,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/jameslauhe/go-firewall/internal/config"
+	accesslog "github.com/jameslauhe/go-firewall/internal/log"
+	"github.com/jameslauhe/go-firewall/internal/metrics"
 	mw "github.com/jameslauhe/go-firewall/internal/middleware"
 	"github.com/jameslauhe/go-firewall/internal/middleware/ipfilter"
 	"github.com/jameslauhe/go-firewall/internal/middleware/ratelimit"
@@ -29,6 +33,7 @@ func main() {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+	accesslog.ConfigureDefault(cfg.Log)
 
 	if err := run(cfg); err != nil {
 		slog.Error("go-firewall exited with error", "error", err)
@@ -53,7 +58,21 @@ func run(cfg *config.Config) error {
 	rateLimiter := ratelimit.New(cfg.RateLimit)
 	defer rateLimiter.Stop()
 
-	mws := []mw.Middleware{mw.AttachRecorder, ipFilter.Middleware(), rateLimiter.Middleware()}
+	accessLog, err := accesslog.New(cfg.Log)
+	if err != nil {
+		return err
+	}
+	defer accessLog.Close()
+
+	m := metrics.New(cfg.Metrics.Path, rateLimiter.ActiveBuckets)
+
+	mws := []mw.Middleware{
+		mw.AttachRecorder,
+		accessLog.Middleware(),
+		m.Middleware(),
+		ipFilter.Middleware(),
+		rateLimiter.Middleware(),
+	}
 
 	if cfg.WAF.Enabled {
 		wafEngine, err := waf.NewEngine(cfg.WAF)
@@ -68,6 +87,18 @@ func run(cfg *config.Config) error {
 	srv, err := server.New(cfg.Listen, handler)
 	if err != nil {
 		return err
+	}
+
+	var metricsSrv *http.Server
+	if cfg.Metrics.Enabled {
+		mux := http.NewServeMux()
+		mux.Handle(m.Path(), m.Handler())
+		metricsSrv = &http.Server{Addr: cfg.Metrics.Address, Handler: mux}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("metrics server exited unexpectedly", "error", err)
+			}
+		}()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -85,6 +116,9 @@ func run(cfg *config.Config) error {
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Warn("shutdown did not complete cleanly", "error", err)
+		}
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
 		}
 		return nil
 	case err := <-errCh:

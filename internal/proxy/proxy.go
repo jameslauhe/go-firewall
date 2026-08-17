@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jameslauhe/go-firewall/internal/config"
@@ -180,8 +182,28 @@ func (p *Proxy) handleProxyError(w http.ResponseWriter, r *http.Request, err err
 	if rec, ok := mw.RecorderFrom(r.Context()); ok {
 		rec.SetBlocked(mw.BlockReasonUpstreamError)
 		rec.SetUpstream(upstreamAddr(u), http.StatusBadGateway)
+		rec.SetUpstreamErrorReason(classifyUpstreamError(err))
 	}
 	w.WriteHeader(http.StatusBadGateway)
+}
+
+// classifyUpstreamError buckets an upstream RoundTrip error into a small,
+// fixed set of reasons — never the raw error string — since this feeds a
+// Prometheus label and an unbounded label set would be a cardinality
+// explosion.
+func classifyUpstreamError(err error) string {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection-refused"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return "dial-error"
+	}
+	return "other"
 }
 
 func (p *Proxy) pickOtherThan(exclude *upstream) *upstream {
@@ -196,6 +218,7 @@ func (p *Proxy) pickOtherThan(exclude *upstream) *upstream {
 func (p *Proxy) writeUnavailable(w http.ResponseWriter, r *http.Request, reason string) {
 	if rec, ok := mw.RecorderFrom(r.Context()); ok {
 		rec.SetBlocked(mw.BlockReasonUpstreamError)
+		rec.SetUpstreamErrorReason("no-upstream-available")
 	}
 	slog.Warn("no upstream available", "reason", reason)
 	w.WriteHeader(http.StatusServiceUnavailable)

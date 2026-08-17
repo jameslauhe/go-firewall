@@ -47,18 +47,26 @@ const (
 // Recorder, stores a pointer to it in the context it passes downstream, and
 // reads the same pointer's fields back after ServeHTTP returns.
 type Recorder struct {
-	mu             sync.Mutex
-	outcome        Outcome
-	blockReason    BlockReason
-	wafRuleID      int
-	wafCategory    string
-	upstream       string
-	upstreamStatus int
-	requestID      string
+	mu                  sync.Mutex
+	outcome             Outcome
+	blockReason         BlockReason
+	wafRuleID           int
+	wafCategory         string
+	upstream            string
+	upstreamStatus      int
+	upstreamErrorReason string
+	requestID           string
 }
 
 func NewRecorder(requestID string) *Recorder {
 	return &Recorder{outcome: OutcomeAllowed, requestID: requestID}
+}
+
+// RequestID returns the request ID without a full Snapshot. Safe to call
+// at any point since requestID is set once at construction and never
+// mutated afterward.
+func (r *Recorder) RequestID() string {
+	return r.requestID
 }
 
 func (r *Recorder) SetBlocked(reason BlockReason) {
@@ -82,28 +90,40 @@ func (r *Recorder) SetUpstream(addr string, status int) {
 	r.upstreamStatus = status
 }
 
+// SetUpstreamErrorReason records a bounded error classification (e.g.
+// "timeout", "connection-refused") for the upstream_errors_total metric.
+// It must stay a small, fixed set of values — never a raw error string —
+// to avoid unbounded Prometheus label cardinality.
+func (r *Recorder) SetUpstreamErrorReason(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.upstreamErrorReason = reason
+}
+
 // Snapshot is a point-in-time, race-free copy of a Recorder's fields.
 type Snapshot struct {
-	Outcome        Outcome
-	BlockReason    BlockReason
-	WAFRuleID      int
-	WAFCategory    string
-	Upstream       string
-	UpstreamStatus int
-	RequestID      string
+	Outcome             Outcome
+	BlockReason         BlockReason
+	WAFRuleID           int
+	WAFCategory         string
+	Upstream            string
+	UpstreamStatus      int
+	UpstreamErrorReason string
+	RequestID           string
 }
 
 func (r *Recorder) Snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return Snapshot{
-		Outcome:        r.outcome,
-		BlockReason:    r.blockReason,
-		WAFRuleID:      r.wafRuleID,
-		WAFCategory:    r.wafCategory,
-		Upstream:       r.upstream,
-		UpstreamStatus: r.upstreamStatus,
-		RequestID:      r.requestID,
+		Outcome:             r.outcome,
+		BlockReason:         r.blockReason,
+		WAFRuleID:           r.wafRuleID,
+		WAFCategory:         r.wafCategory,
+		Upstream:            r.upstream,
+		UpstreamStatus:      r.upstreamStatus,
+		UpstreamErrorReason: r.upstreamErrorReason,
+		RequestID:           r.requestID,
 	}
 }
 
