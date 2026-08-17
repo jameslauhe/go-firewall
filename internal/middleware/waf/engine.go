@@ -13,11 +13,20 @@ import (
 	mw "github.com/jameslauhe/go-firewall/internal/middleware"
 )
 
+// override is a per-rule admin-dashboard adjustment layered on top of the
+// loaded ruleset without touching the rules file: disable a rule, or force
+// its action, for live tuning.
+type override struct {
+	enabled bool
+	action  string // "" = keep the rule's own action
+}
+
 // Engine holds a hot-swappable RuleSet (atomic pointer, so SIGHUP-driven
 // reloads never block a request in flight) and inspects requests against
 // it.
 type Engine struct {
 	ruleSet       atomic.Pointer[RuleSet]
+	overrides     atomic.Pointer[map[int]override] // admin-dashboard per-rule overrides, keyed by rule id
 	maxBodyBytes  int64
 	defaultAction string // "log-only" forces every rule to behave as log-only, for dry-run tuning
 }
@@ -32,12 +41,16 @@ func NewEngine(cfg config.WAFConfig) (*Engine, error) {
 		defaultAction: cfg.DefaultAction,
 	}
 	e.ruleSet.Store(rs)
+	empty := map[int]override{}
+	e.overrides.Store(&empty)
 	return e, nil
 }
 
 // Reload atomically swaps in a freshly parsed ruleset. On error the
 // previously loaded ruleset keeps serving unchanged — a malformed rules
-// file must not take down a live WAF.
+// file must not take down a live WAF. Existing per-rule overrides are left
+// as-is; overrides referencing rule ids no longer present are simply
+// inert.
 func (e *Engine) Reload(path string) error {
 	rs, err := LoadRuleSet(path)
 	if err != nil {
@@ -51,11 +64,93 @@ func (e *Engine) RuleCount() int {
 	return e.ruleSet.Load().RuleCount()
 }
 
-func (e *Engine) effectiveAction(r Rule) string {
-	if e.defaultAction == "log-only" {
-		return ActionLog
+// RuleInfo is a rule's effective (override-applied) state, for the admin
+// dashboard.
+type RuleInfo struct {
+	ID          int      `json:"id"`
+	Category    string   `json:"category"`
+	Severity    string   `json:"severity"`
+	Description string   `json:"description"`
+	Targets     []string `json:"targets"`
+	Action      string   `json:"action"`
+	Enabled     bool     `json:"enabled"`
+	Overridden  bool     `json:"overridden"`
+}
+
+// ListRules returns every loaded rule's effective state for the admin
+// dashboard.
+func (e *Engine) ListRules() []RuleInfo {
+	rs := e.ruleSet.Load()
+	overrides := e.overrides.Load()
+	out := make([]RuleInfo, 0, len(rs.all))
+	for _, r := range rs.all {
+		info := RuleInfo{
+			ID: r.ID, Category: r.Category, Severity: r.Severity,
+			Description: r.Description, Targets: r.Targets,
+			Action: r.Action, Enabled: true,
+		}
+		if o, ok := (*overrides)[r.ID]; ok {
+			info.Enabled = o.enabled
+			if o.action != "" {
+				info.Action = o.action
+			}
+			info.Overridden = true
+		}
+		out = append(out, info)
 	}
-	return r.Action
+	return out
+}
+
+// SetOverride disables/enables a rule and/or forces its action, without
+// touching the rules file. action == "" leaves the rule's own action in
+// place. Returns an error if id doesn't match any loaded rule.
+func (e *Engine) SetOverride(id int, enabled bool, action string) error {
+	if action != "" && action != ActionBlock && action != ActionLog {
+		return fmt.Errorf("waf: invalid action %q", action)
+	}
+	rs := e.ruleSet.Load()
+	found := false
+	for _, r := range rs.all {
+		if r.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("waf: unknown rule id %d", id)
+	}
+
+	for {
+		old := e.overrides.Load()
+		next := make(map[int]override, len(*old)+1)
+		for k, v := range *old {
+			next[k] = v
+		}
+		next[id] = override{enabled: enabled, action: action}
+		if e.overrides.CompareAndSwap(old, &next) {
+			return nil
+		}
+	}
+}
+
+// ClearOverride removes a rule's admin-dashboard override, reverting it to
+// the rules file's own action/enabled state.
+func (e *Engine) ClearOverride(id int) {
+	for {
+		old := e.overrides.Load()
+		if _, ok := (*old)[id]; !ok {
+			return
+		}
+		next := make(map[int]override, len(*old))
+		for k, v := range *old {
+			if k != id {
+				next[k] = v
+			}
+		}
+		if e.overrides.CompareAndSwap(old, &next) {
+			return
+		}
+	}
 }
 
 // Inspect checks r against the current ruleset and reports the first
@@ -124,14 +219,30 @@ func (e *Engine) Inspect(r *http.Request) (blocked bool, match *Rule, err error)
 // check tests target against rules, returning the first block-action
 // match. log-action matches are recorded but evaluation continues.
 func (e *Engine) check(rules []Rule, target string) *Rule {
+	overrides := e.overrides.Load()
 	for i := range rules {
-		if !rules[i].compiled.MatchString(target) {
+		r := &rules[i]
+
+		action := r.Action
+		if o, ok := (*overrides)[r.ID]; ok {
+			if !o.enabled {
+				continue
+			}
+			if o.action != "" {
+				action = o.action
+			}
+		}
+		if e.defaultAction == "log-only" {
+			action = ActionLog
+		}
+
+		if !r.compiled.MatchString(target) {
 			continue
 		}
-		if e.effectiveAction(rules[i]) == ActionBlock {
-			return &rules[i]
+		if action == ActionBlock {
+			return r
 		}
-		slog.Info("waf rule matched (log-only)", "rule_id", rules[i].ID, "category", rules[i].Category)
+		slog.Info("waf rule matched (log-only)", "rule_id", r.ID, "category", r.Category)
 	}
 	return nil
 }

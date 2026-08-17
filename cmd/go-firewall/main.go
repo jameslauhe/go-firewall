@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jameslauhe/go-firewall/internal/admin"
 	"github.com/jameslauhe/go-firewall/internal/config"
 	accesslog "github.com/jameslauhe/go-firewall/internal/log"
 	"github.com/jameslauhe/go-firewall/internal/metrics"
@@ -74,8 +75,9 @@ func run(cfg *config.Config) error {
 		rateLimiter.Middleware(),
 	}
 
+	var wafEngine *waf.Engine
 	if cfg.WAF.Enabled {
-		wafEngine, err := waf.NewEngine(cfg.WAF)
+		wafEngine, err = waf.NewEngine(cfg.WAF)
 		if err != nil {
 			return err
 		}
@@ -101,6 +103,28 @@ func run(cfg *config.Config) error {
 		}()
 	}
 
+	var adminSrv *http.Server
+	if cfg.Admin.Enabled {
+		listeners := make([]string, len(cfg.Listen))
+		for i, l := range cfg.Listen {
+			listeners[i] = l.Address
+		}
+		adminServer, err := admin.New(cfg.Admin, admin.Info{
+			Version:   version.Version,
+			Listeners: listeners,
+			Upstreams: cfg.Upstreams.Addresses,
+		}, accessLog, ipFilter, wafEngine)
+		if err != nil {
+			return err
+		}
+		adminSrv = &http.Server{Addr: cfg.Admin.Address, Handler: adminServer.Handler()}
+		go func() {
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("admin server exited unexpectedly", "error", err)
+			}
+		}()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -119,6 +143,9 @@ func run(cfg *config.Config) error {
 		}
 		if metricsSrv != nil {
 			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
+		if adminSrv != nil {
+			_ = adminSrv.Shutdown(shutdownCtx)
 		}
 		return nil
 	case err := <-errCh:

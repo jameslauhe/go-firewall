@@ -5,17 +5,30 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 
 	"github.com/jameslauhe/go-firewall/internal/config"
 	"github.com/jameslauhe/go-firewall/internal/geoip"
 	mw "github.com/jameslauhe/go-firewall/internal/middleware"
 )
 
+// listState pairs a compiled Matcher with the raw CIDR strings it was
+// built from, so the admin API can list the current contents without
+// needing to decompile a Matcher back into strings.
+type listState struct {
+	cidrs   []string
+	matcher Matcher
+}
+
 // Filter is the first pipeline stage: CIDR allow/deny matching, optionally
-// followed by a geo-IP allow-list check.
+// followed by a geo-IP allow-list check. The allow/deny lists are held
+// behind atomic pointers so the admin dashboard can add or remove entries
+// at runtime (copy-on-write: a mutation builds a new listState and
+// compare-and-swaps it in, so concurrent requests never see a partially
+// updated list).
 type Filter struct {
-	allow Matcher // nil = allow-list mode disabled (deny list is authoritative)
-	deny  Matcher
+	allow atomic.Pointer[listState] // nil contents = allow-list mode disabled (deny list is authoritative)
+	deny  atomic.Pointer[listState]
 
 	geo            *geoip.DB
 	allowCountries map[string]struct{} // nil/empty = geo check disabled
@@ -24,19 +37,17 @@ type Filter struct {
 func New(cfg config.IPListConfig) (*Filter, error) {
 	f := &Filter{}
 
-	if len(cfg.Allow) > 0 {
-		m, err := NewMatcher(cfg.Allow)
-		if err != nil {
-			return nil, err
-		}
-		f.allow = m
-	}
-
-	deny, err := NewMatcher(cfg.Deny)
+	allowState, err := newListState(cfg.Allow)
 	if err != nil {
 		return nil, err
 	}
-	f.deny = deny
+	f.allow.Store(allowState)
+
+	denyState, err := newListState(cfg.Deny)
+	if err != nil {
+		return nil, err
+	}
+	f.deny.Store(denyState)
 
 	if cfg.Geo.Enabled && len(cfg.Geo.AllowCountries) > 0 {
 		db, err := geoip.Open(cfg.Geo.DBPath)
@@ -53,6 +64,16 @@ func New(cfg config.IPListConfig) (*Filter, error) {
 	return f, nil
 }
 
+func newListState(cidrs []string) (*listState, error) {
+	m, err := NewMatcher(cidrs)
+	if err != nil {
+		return nil, err
+	}
+	cp := make([]string, len(cidrs))
+	copy(cp, cidrs)
+	return &listState{cidrs: cp, matcher: m}, nil
+}
+
 func (f *Filter) Close() error {
 	if f.geo != nil {
 		return f.geo.Close()
@@ -62,10 +83,10 @@ func (f *Filter) Close() error {
 
 // Allowed reports whether ip may proceed, and if not, why.
 func (f *Filter) Allowed(ip netip.Addr) (bool, mw.BlockReason) {
-	if f.allow != nil && !f.allow.Contains(ip) {
+	if allow := f.allow.Load(); len(allow.cidrs) > 0 && !allow.matcher.Contains(ip) {
 		return false, mw.BlockReasonIPDeny
 	}
-	if f.deny.Contains(ip) {
+	if f.deny.Load().matcher.Contains(ip) {
 		return false, mw.BlockReasonIPDeny
 	}
 	if f.geo != nil {
@@ -80,6 +101,67 @@ func (f *Filter) Allowed(ip netip.Addr) (bool, mw.BlockReason) {
 		}
 	}
 	return true, ""
+}
+
+// ListAllow and ListDeny return the current CIDR lists, for the admin API.
+func (f *Filter) ListAllow() []string { return append([]string(nil), f.allow.Load().cidrs...) }
+func (f *Filter) ListDeny() []string  { return append([]string(nil), f.deny.Load().cidrs...) }
+
+// AddAllow, RemoveAllow, AddDeny, and RemoveDeny mutate the respective list
+// at runtime via compare-and-swap, retrying if a concurrent mutation raced
+// it. Adding an invalid CIDR or removing one not present is reported via
+// the returned error/bool without touching the live list.
+func (f *Filter) AddAllow(cidr string) error { return addCIDR(&f.allow, cidr) }
+func (f *Filter) AddDeny(cidr string) error  { return addCIDR(&f.deny, cidr) }
+
+func (f *Filter) RemoveAllow(cidr string) (bool, error) { return removeCIDR(&f.allow, cidr) }
+func (f *Filter) RemoveDeny(cidr string) (bool, error)  { return removeCIDR(&f.deny, cidr) }
+
+func addCIDR(p *atomic.Pointer[listState], cidr string) error {
+	if _, err := netip.ParsePrefix(cidr); err != nil {
+		return fmt.Errorf("ipfilter: invalid CIDR %q: %w", cidr, err)
+	}
+	for {
+		old := p.Load()
+		for _, c := range old.cidrs {
+			if c == cidr {
+				return nil // already present
+			}
+		}
+		next := append(append([]string(nil), old.cidrs...), cidr)
+		newState, err := newListState(next)
+		if err != nil {
+			return err
+		}
+		if p.CompareAndSwap(old, newState) {
+			return nil
+		}
+	}
+}
+
+func removeCIDR(p *atomic.Pointer[listState], cidr string) (bool, error) {
+	for {
+		old := p.Load()
+		next := make([]string, 0, len(old.cidrs))
+		found := false
+		for _, c := range old.cidrs {
+			if c == cidr {
+				found = true
+				continue
+			}
+			next = append(next, c)
+		}
+		if !found {
+			return false, nil
+		}
+		newState, err := newListState(next)
+		if err != nil {
+			return false, err
+		}
+		if p.CompareAndSwap(old, newState) {
+			return true, nil
+		}
+	}
 }
 
 // Middleware returns the http middleware enforcing this Filter. It must be

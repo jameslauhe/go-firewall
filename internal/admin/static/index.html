@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>go-firewall admin</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background: #0b0f14; color: #d8dee9; }
+  h1 { font-size: 1.25rem; }
+  h2 { font-size: 1rem; margin-top: 2rem; border-bottom: 1px solid #2a3441; padding-bottom: .25rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .85rem; }
+  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #1c232c; }
+  th { color: #8fa1b3; font-weight: 600; }
+  input, select, button { background: #131a22; color: #d8dee9; border: 1px solid #2a3441; border-radius: 4px; padding: .35rem .5rem; }
+  button { cursor: pointer; }
+  button:hover { border-color: #4c8bf5; }
+  .row { display: flex; gap: .5rem; align-items: center; margin-top: .5rem; }
+  .blocked { color: #f87171; }
+  .allowed { color: #4ade80; }
+  .muted { color: #6b7889; font-size: .8rem; }
+  #authGate { max-width: 420px; }
+  #app { display: none; }
+</style>
+</head>
+<body>
+
+<div id="authGate">
+  <h1>go-firewall admin</h1>
+  <p class="muted">Enter the admin bearer token to continue. It is kept only in this browser tab's session storage.</p>
+  <div class="row">
+    <input id="tokenInput" type="password" placeholder="admin token" style="flex:1">
+    <button onclick="saveToken()">Connect</button>
+  </div>
+  <p id="authError" class="blocked"></p>
+</div>
+
+<div id="app">
+  <h1>go-firewall admin <button style="float:right" onclick="logout()">sign out</button></h1>
+
+  <h2>Status</h2>
+  <table id="statusTable"><tbody></tbody></table>
+
+  <h2>IP lists</h2>
+  <div class="row">
+    <select id="ipListSelect"><option value="deny">deny</option><option value="allow">allow</option></select>
+    <input id="ipCidrInput" placeholder="203.0.113.0/24" style="flex:1">
+    <button onclick="addIP()">Add</button>
+  </div>
+  <table id="ipListsTable"><thead><tr><th>List</th><th>CIDR</th><th></th></tr></thead><tbody></tbody></table>
+
+  <h2>WAF rules</h2>
+  <table id="rulesTable">
+    <thead><tr><th>ID</th><th>Category</th><th>Severity</th><th>Description</th><th>Enabled</th><th>Action</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Recent requests <button style="float:right" onclick="loadLogs()">refresh</button></h2>
+  <div class="row">
+    <select id="outcomeFilter">
+      <option value="">any outcome</option>
+      <option value="allowed">allowed</option>
+      <option value="blocked">blocked</option>
+    </select>
+    <select id="reasonFilter">
+      <option value="">any reason</option>
+      <option value="ip-deny">ip-deny</option>
+      <option value="geo-deny">geo-deny</option>
+      <option value="rate-limit">rate-limit</option>
+      <option value="waf">waf</option>
+      <option value="upstream-error">upstream-error</option>
+    </select>
+    <button onclick="loadLogs()">Filter</button>
+  </div>
+  <table id="logsTable">
+    <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Client IP</th><th>Outcome</th><th>Reason</th><th>Status</th><th>Latency (ms)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+function token() { return sessionStorage.getItem('gofirewall_admin_token') || ''; }
+
+function saveToken() {
+  const t = document.getElementById('tokenInput').value.trim();
+  if (!t) return;
+  sessionStorage.setItem('gofirewall_admin_token', t);
+  document.getElementById('authError').textContent = '';
+  init();
+}
+
+function logout() {
+  sessionStorage.removeItem('gofirewall_admin_token');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('authGate').style.display = 'block';
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + token() });
+  const res = await fetch(path, opts);
+  if (res.status === 401) {
+    document.getElementById('authError').textContent = 'Invalid or missing token.';
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('authGate').style.display = 'block';
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+async function loadStatus() {
+  const res = await api('/admin/api/status');
+  const s = await res.json();
+  const tbody = document.querySelector('#statusTable tbody');
+  tbody.innerHTML = '';
+  const rows = [
+    ['Version', s.version],
+    ['Uptime (s)', Math.round(s.uptime_seconds)],
+    ['Listeners', (s.listeners || []).join(', ')],
+    ['Upstreams', (s.upstreams || []).join(', ')],
+    ['WAF enabled', s.waf_enabled],
+    ['WAF rule count', s.waf_rule_count],
+  ];
+  for (const [k, v] of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<th>' + k + '</th><td>' + v + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadIPLists() {
+  const res = await api('/admin/api/ip-lists');
+  const data = await res.json();
+  const tbody = document.querySelector('#ipListsTable tbody');
+  tbody.innerHTML = '';
+  for (const list of ['deny', 'allow']) {
+    for (const cidr of (data[list] || [])) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + list + '</td><td>' + cidr + '</td><td><button data-list="' + list + '" data-cidr="' + cidr + '">remove</button></td>';
+      tr.querySelector('button').addEventListener('click', (e) => removeIP(e.target.dataset.list, e.target.dataset.cidr));
+      tbody.appendChild(tr);
+    }
+  }
+}
+
+async function addIP() {
+  const list = document.getElementById('ipListSelect').value;
+  const cidr = document.getElementById('ipCidrInput').value.trim();
+  if (!cidr) return;
+  await api('/admin/api/ip-lists/' + list, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cidr }) });
+  document.getElementById('ipCidrInput').value = '';
+  loadIPLists();
+}
+
+async function removeIP(list, cidr) {
+  await api('/admin/api/ip-lists/' + list, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cidr }) });
+  loadIPLists();
+}
+
+async function loadRules() {
+  const res = await api('/admin/api/waf-rules');
+  const rules = await res.json();
+  const tbody = document.querySelector('#rulesTable tbody');
+  tbody.innerHTML = '';
+  for (const rule of rules) {
+    const tr = document.createElement('tr');
+    const enabledBox = document.createElement('input');
+    enabledBox.type = 'checkbox';
+    enabledBox.checked = rule.enabled;
+    enabledBox.addEventListener('change', () => patchRule(rule.id, { enabled: enabledBox.checked }));
+
+    const actionSelect = document.createElement('select');
+    for (const a of ['block', 'log']) {
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = a;
+      if (a === rule.action) opt.selected = true;
+      actionSelect.appendChild(opt);
+    }
+    actionSelect.addEventListener('change', () => patchRule(rule.id, { action: actionSelect.value }));
+
+    const tdEnabled = document.createElement('td');
+    tdEnabled.appendChild(enabledBox);
+    const tdAction = document.createElement('td');
+    tdAction.appendChild(actionSelect);
+
+    tr.innerHTML = '<td>' + rule.id + '</td><td>' + rule.category + '</td><td>' + rule.severity + '</td><td>' + (rule.description || '') + '</td>';
+    tr.appendChild(tdEnabled);
+    tr.appendChild(tdAction);
+    tbody.appendChild(tr);
+  }
+}
+
+async function patchRule(id, body) {
+  await api('/admin/api/waf-rules/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+async function loadLogs() {
+  const outcome = document.getElementById('outcomeFilter').value;
+  const reason = document.getElementById('reasonFilter').value;
+  const params = new URLSearchParams({ limit: '100' });
+  if (outcome) params.set('outcome', outcome);
+  if (reason) params.set('reason', reason);
+  const res = await api('/admin/api/logs?' + params.toString());
+  const entries = await res.json();
+  const tbody = document.querySelector('#logsTable tbody');
+  tbody.innerHTML = '';
+  for (const e of (entries || [])) {
+    const tr = document.createElement('tr');
+    const outcomeClass = e.outcome === 'blocked' ? 'blocked' : 'allowed';
+    tr.innerHTML = '<td>' + new Date(e.timestamp).toLocaleTimeString() + '</td>' +
+      '<td>' + e.method + '</td><td>' + e.path + '</td><td>' + e.client_ip + '</td>' +
+      '<td class="' + outcomeClass + '">' + e.outcome + '</td><td>' + (e.block_reason || '') + '</td>' +
+      '<td>' + e.status_code + '</td><td>' + e.latency_ms + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
+async function init() {
+  document.getElementById('authGate').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  try {
+    await Promise.all([loadStatus(), loadIPLists(), loadRules(), loadLogs()]);
+  } catch (e) {
+    // errors already surfaced via api()'s 401 handling
+  }
+}
+
+if (token()) { init(); }
+</script>
+</body>
+</html>
