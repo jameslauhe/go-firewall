@@ -262,6 +262,18 @@ func (f *Filter) Allowed(ip netip.Addr) (bool, mw.BlockReason) {
 func (f *Filter) ListAllow() []string { return append([]string(nil), f.allow.Load().effective...) }
 func (f *Filter) ListDeny() []string  { return append([]string(nil), f.deny.Load().effective...) }
 
+// AllowOverlay and DenyOverlay return the current admin-added/removed CIDR
+// sets (independent of the config-file base layer), for persisting
+// admin-dashboard edits to disk. See listState's doc comment for why these
+// are two current sets rather than an ordered log.
+func (f *Filter) AllowOverlay() (added, removed []string) { return overlayOf(&f.allow) }
+func (f *Filter) DenyOverlay() (added, removed []string)  { return overlayOf(&f.deny) }
+
+func overlayOf(p *atomic.Pointer[listState]) (added, removed []string) {
+	s := p.Load()
+	return append([]string(nil), s.adminAdded...), append([]string(nil), s.adminRemoved...)
+}
+
 // AddAllow, RemoveAllow, AddDeny, and RemoveDeny mutate the respective
 // list's admin overlay at runtime via compare-and-swap, retrying if a
 // concurrent mutation raced it. Adding an invalid CIDR or removing one not

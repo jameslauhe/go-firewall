@@ -9,7 +9,7 @@ An L7 reverse-proxy / WAF that sits in front of an existing API gateway (Nginx, 
 - **Rate limiting**, per-IP and per-route, token bucket.
 - **WAF rule engine** — data-driven YAML rules (SQLi, XSS, path traversal, command injection out of the box), RE2-compiled for ReDoS-safety.
 - **Structured JSON access logs** + **Prometheus metrics** on a private listener.
-- **Admin dashboard** (private listener, bearer-token auth) for live log viewing and runtime IP-list/WAF-rule management, with no restart required.
+- **Admin dashboard** (private listener, bearer-token auth) for live log viewing and runtime IP-list/WAF-rule management, with no restart required; edits optionally persist to disk (`admin.state_file`) and survive a restart.
 - **SIGHUP-triggered config reload** for WAF rules, IP lists (including geo), and rate limits — no restart, no dropped connections; SIGTERM/SIGINT graceful shutdown.
 
 See `configs/config.example.yaml` for the full configuration surface and `configs/rules/default.yaml` for the seed WAF rule set.
@@ -53,6 +53,22 @@ export GOFIREWALL_ADMIN_TOKEN=$(openssl rand -hex 32)
 ```
 
 Then visit `http://127.0.0.1:9091/admin/` and enter the token.
+
+By default, IP-list and WAF-rule edits made through the dashboard are in-memory only and reset on restart. Set `admin.state_file` to a writable path to persist them:
+
+```yaml
+admin:
+  state_file: "/var/lib/go-firewall/state.json"
+```
+
+In the container image, mount a writable volume at that path (the distroless image has no shell to create directories at runtime):
+
+```sh
+docker run --rm -p 8080:8080 -p 8443:8443 \
+  -e GOFIREWALL_ADMIN_TOKEN=change-me \
+  -v $(pwd)/data:/var/lib/go-firewall \
+  go-firewall:dev
+```
 
 ## Config reload
 

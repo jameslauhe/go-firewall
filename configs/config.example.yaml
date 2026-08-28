@@ -52,6 +52,12 @@ admin:
   # Bearer token is read from this environment variable at startup, never
   # stored in this file.
   auth_token_env: "GOFIREWALL_ADMIN_TOKEN"
+  # Optional: persist admin-dashboard IP-list/WAF-rule edits to this file
+  # so they survive a restart. Leave unset (the default) to keep edits
+  # in-memory only, exactly like before this field existed. The directory
+  # must be writable — e.g. a mounted volume when running the container
+  # image.
+  state_file: ""
 
 rate_limit:
   enabled: true

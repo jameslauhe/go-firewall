@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -51,27 +52,124 @@ type Server struct {
 	startedAt time.Time
 	info      Info
 
-	accessLog *accesslog.AccessLog
-	ipFilter  *ipfilter.Filter
-	wafEngine *waf.Engine // nil if WAF is disabled
+	accessLog  *accesslog.AccessLog
+	ipFilter   *ipfilter.Filter
+	wafEngine  *waf.Engine // nil if WAF is disabled
+	stateStore *StateStore // nil if cfg.StateFile is unset (edits stay in-memory only)
 }
 
 // New reads the bearer token from the environment variable named by
 // cfg.AuthTokenEnv. An empty/unset value is a startup error: an admin
 // surface with no effective auth would be a silent security regression.
+//
+// If cfg.StateFile is set, New also loads and replays any previously
+// persisted admin-dashboard edits onto ipFilter/wafEngine before
+// returning, so a restart picks up where the dashboard left off. A
+// corrupt or unreadable state file fails startup (the same fail-fast
+// treatment as a bad config/rules file); an individual stale entry within
+// an otherwise-valid state file (e.g. referencing a WAF rule id that no
+// longer exists) is logged and skipped rather than failing startup — see
+// replayState.
 func New(cfg config.AdminConfig, info Info, accessLog *accesslog.AccessLog, ipFilter *ipfilter.Filter, wafEngine *waf.Engine) (*Server, error) {
 	token := os.Getenv(cfg.AuthTokenEnv)
 	if token == "" {
 		return nil, fmt.Errorf("admin: environment variable %s is empty or unset", cfg.AuthTokenEnv)
 	}
-	return &Server{
+
+	s := &Server{
 		token:     token,
 		startedAt: time.Now(),
 		info:      info,
 		accessLog: accessLog,
 		ipFilter:  ipFilter,
 		wafEngine: wafEngine,
-	}, nil
+	}
+
+	if cfg.StateFile != "" {
+		store := NewStateStore(cfg.StateFile)
+		state, err := store.Load()
+		if err != nil {
+			return nil, fmt.Errorf("admin: load state file: %w", err)
+		}
+		replayState(state, ipFilter, wafEngine)
+		s.stateStore = store
+	}
+
+	return s, nil
+}
+
+// replayState applies a previously persisted State onto ipFilter/wafEngine.
+// Individual entries that no longer apply cleanly (e.g. a WAF rule id from
+// an old rules file) are logged and skipped rather than treated as fatal —
+// state drift between what was persisted and what's now loaded from
+// config/rules files is expected over time, not a startup error.
+func replayState(state State, ipFilter *ipfilter.Filter, wafEngine *waf.Engine) {
+	for _, cidr := range state.IPLists.AllowRemoved {
+		if _, err := ipFilter.RemoveAllow(cidr); err != nil {
+			slog.Warn("admin: state replay: allow removal failed", "cidr", cidr, "error", err)
+		}
+	}
+	for _, cidr := range state.IPLists.AllowAdded {
+		if err := ipFilter.AddAllow(cidr); err != nil {
+			slog.Warn("admin: state replay: allow addition failed", "cidr", cidr, "error", err)
+		}
+	}
+	for _, cidr := range state.IPLists.DenyRemoved {
+		if _, err := ipFilter.RemoveDeny(cidr); err != nil {
+			slog.Warn("admin: state replay: deny removal failed", "cidr", cidr, "error", err)
+		}
+	}
+	for _, cidr := range state.IPLists.DenyAdded {
+		if err := ipFilter.AddDeny(cidr); err != nil {
+			slog.Warn("admin: state replay: deny addition failed", "cidr", cidr, "error", err)
+		}
+	}
+
+	if wafEngine == nil {
+		return
+	}
+	for id, o := range state.WAFOverrides {
+		if err := wafEngine.SetOverride(id, o.Enabled, o.Action); err != nil {
+			slog.Warn("admin: state replay: waf override failed", "rule_id", id, "error", err)
+		}
+	}
+}
+
+// currentState snapshots the live admin overlay for persistence.
+func (s *Server) currentState() State {
+	allowAdded, allowRemoved := s.ipFilter.AllowOverlay()
+	denyAdded, denyRemoved := s.ipFilter.DenyOverlay()
+
+	state := State{
+		IPLists: IPListState{
+			AllowAdded:   orEmpty(allowAdded),
+			AllowRemoved: orEmpty(allowRemoved),
+			DenyAdded:    orEmpty(denyAdded),
+			DenyRemoved:  orEmpty(denyRemoved),
+		},
+		WAFOverrides: map[int]WAFOverride{},
+	}
+	if s.wafEngine != nil {
+		for id, o := range s.wafEngine.Overrides() {
+			state.WAFOverrides[id] = WAFOverride{Enabled: o.Enabled, Action: o.Action}
+		}
+	}
+	return state
+}
+
+// persist saves the current admin overlay if a state file is configured.
+// A save failure does not fail the caller's request — the in-memory
+// mutation already took effect — but is logged loudly and surfaced via a
+// response header, since a silently-unpersisted edit would be lost on the
+// next restart with no other indication.
+func (s *Server) persist(w http.ResponseWriter) {
+	if s.stateStore == nil {
+		return
+	}
+	if err := s.stateStore.Save(s.currentState()); err != nil {
+		slog.Error("admin: failed to persist state", "error", err)
+		w.Header().Set("X-Persistence-Warning", "change applied but not persisted to disk: "+err.Error())
+	}
 }
 
 // Handler returns the full admin mux: an unauthenticated static UI shell
@@ -179,6 +277,7 @@ func (s *Server) handleAddIP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.persist(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -207,6 +306,7 @@ func (s *Server) handleRemoveIP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	s.persist(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -264,6 +364,7 @@ func (s *Server) handlePatchRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.persist(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 

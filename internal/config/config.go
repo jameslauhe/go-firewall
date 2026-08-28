@@ -72,6 +72,12 @@ type AdminConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	Address      string `yaml:"address"`
 	AuthTokenEnv string `yaml:"auth_token_env"`
+	// StateFile, if set, persists admin-dashboard IP-list/WAF-rule edits
+	// to this JSON file so they survive a restart. Empty (the default)
+	// means edits stay in-memory only, exactly like before this field
+	// existed. The directory must be writable — e.g. a mounted volume
+	// when running in the distroless container image.
+	StateFile string `yaml:"state_file"`
 }
 
 type RateLimitConfig struct {

@@ -133,6 +133,32 @@ func (e *Engine) SetOverride(id int, enabled bool, action string) error {
 	}
 }
 
+// Override is a rule's raw admin-dashboard adjustment, for persistence.
+// Unlike RuleInfo.Action (from ListRules), Action here may be "" — meaning
+// "no action override, follow whatever the rules file says" — rather than
+// the effective, already-resolved action. Persisting the raw form matters:
+// if a caller instead saved ListRules' effective Action and replayed it
+// later via SetOverride, an override that only touched Enabled would come
+// back as an explicit Action override baking in whatever the rule's file-
+// defined action happened to be at persist time, silently changing
+// behavior if the rules file's own action for that rule changes later.
+type Override struct {
+	Enabled bool
+	Action  string
+}
+
+// Overrides returns the current admin-dashboard overrides, keyed by rule
+// id, in their raw (not effective-resolved) form — see Override's doc
+// comment for why that distinction matters for persistence.
+func (e *Engine) Overrides() map[int]Override {
+	m := e.overrides.Load()
+	out := make(map[int]Override, len(*m))
+	for id, o := range *m {
+		out[id] = Override{Enabled: o.enabled, Action: o.action}
+	}
+	return out
+}
+
 // ClearOverride removes a rule's admin-dashboard override, reverting it to
 // the rules file's own action/enabled state.
 func (e *Engine) ClearOverride(id int) {
