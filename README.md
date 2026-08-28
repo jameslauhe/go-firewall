@@ -4,12 +4,13 @@ An L7 reverse-proxy / WAF that sits in front of an existing API gateway (Nginx, 
 
 ## Features
 
-- **IP allow/deny lists** (CIDR) and **geo-IP allow-listing** (MaxMind `.mmdb`), e.g. restrict traffic to a single country.
+- **IP allow/deny lists** (CIDR, linear-scan or set-based matching depending on list size) and **geo-IP allow-listing** (MaxMind `.mmdb`), e.g. restrict traffic to a single country.
+- **Trusted-proxy X-Forwarded-For support** — resolves the real client IP from XFF only when the raw TCP peer is an explicitly configured trusted proxy/LB; otherwise (the default) only the raw peer is ever trusted.
 - **Rate limiting**, per-IP and per-route, token bucket.
 - **WAF rule engine** — data-driven YAML rules (SQLi, XSS, path traversal, command injection out of the box), RE2-compiled for ReDoS-safety.
 - **Structured JSON access logs** + **Prometheus metrics** on a private listener.
 - **Admin dashboard** (private listener, bearer-token auth) for live log viewing and runtime IP-list/WAF-rule management, with no restart required.
-- SIGHUP-triggered WAF rule reload; SIGTERM/SIGINT graceful shutdown.
+- **SIGHUP-triggered config reload** for WAF rules, IP lists (including geo), and rate limits — no restart, no dropped connections; SIGTERM/SIGINT graceful shutdown.
 
 See `configs/config.example.yaml` for the full configuration surface and `configs/rules/default.yaml` for the seed WAF rule set.
 
@@ -55,5 +56,12 @@ Then visit `http://127.0.0.1:9091/admin/` and enter the token.
 
 ## Config reload
 
-- WAF rules: edit `waf.rules_file` and send `SIGHUP` to the process — the ruleset hot-swaps with no dropped connections. A malformed reload is rejected and the previous ruleset keeps serving.
-- Everything else: restart the process (full config hot-reload is not yet supported).
+Sending `SIGHUP` to a running process reloads, with no restart and no dropped connections:
+
+- `waf.rules_file` (the WAF ruleset)
+- `ip_lists` (allow/deny CIDRs and geo settings)
+- `rate_limit` (default and per-route thresholds)
+
+Any admin-dashboard edits (live-added/removed CIDRs, per-rule WAF overrides) are preserved across a SIGHUP reload — only the base values from the config/rules files are replaced. A malformed new config is rejected in full (nothing is partially applied) and every component keeps serving its previous state.
+
+Listener addresses, TLS certs, upstream addresses, and the admin/metrics listener addresses are not reloadable — changing those requires a restart.

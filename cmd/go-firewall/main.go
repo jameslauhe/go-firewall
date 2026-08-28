@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -37,13 +38,13 @@ func main() {
 	}
 	accesslog.ConfigureDefault(cfg.Log)
 
-	if err := run(cfg); err != nil {
+	if err := run(*configPath, cfg); err != nil {
 		slog.Error("go-firewall exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfg *config.Config) error {
+func run(configPath string, cfg *config.Config) error {
 	slog.Info("starting go-firewall", "version", version.Version, "commit", version.Commit)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -92,8 +93,9 @@ func run(cfg *config.Config) error {
 			return err
 		}
 		mws = append(mws, wafEngine.Middleware())
-		go watchForReload(ctx, wafEngine, cfg.WAF.RulesFile)
 	}
+
+	go watchForReload(ctx, configPath, wafEngine, ipFilter, rateLimiter)
 
 	handler := mw.Chain(p.Handler(), mws...)
 
@@ -165,10 +167,10 @@ func run(cfg *config.Config) error {
 	}
 }
 
-// watchForReload reloads the WAF ruleset from path on SIGHUP, until ctx is
-// canceled. A failed reload logs and keeps the previous ruleset serving —
-// see waf.Engine.Reload.
-func watchForReload(ctx context.Context, engine *waf.Engine, path string) {
+// watchForReload reloads the WAF ruleset, IP lists, and rate limits on
+// SIGHUP, until ctx is canceled. A failed reload logs and leaves every
+// component serving its previous state — see reloadOnce.
+func watchForReload(ctx context.Context, configPath string, wafEngine *waf.Engine, ipFilter *ipfilter.Filter, rateLimiter *ratelimit.Limiter) {
 	sighup := make(chan os.Signal, 1)
 	signal.Notify(sighup, syscall.SIGHUP)
 	defer signal.Stop(sighup)
@@ -176,13 +178,48 @@ func watchForReload(ctx context.Context, engine *waf.Engine, path string) {
 	for {
 		select {
 		case <-sighup:
-			if err := engine.Reload(path); err != nil {
-				slog.Error("waf rule reload failed, keeping previous ruleset", "error", err)
+			if err := reloadOnce(configPath, wafEngine, ipFilter, rateLimiter); err != nil {
+				slog.Error("config reload failed, keeping previous state", "error", err)
 				continue
 			}
-			slog.Info("waf ruleset reloaded", "rule_count", engine.RuleCount())
+			slog.Info("config reloaded")
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// reloadOnce reloads the WAF ruleset, IP lists, and rate limits from
+// configPath's file. The new config is loaded and fully validated
+// (config.Load) before any live component is touched, so a malformed new
+// config never gets partway applied. Listener addresses, TLS, upstream
+// addresses, and admin/metrics addresses are intentionally not re-read —
+// changing those requires a process restart.
+//
+// Applying WAF, then ip lists, then rate limits is not a full staged
+// multi-object transaction: a failure reloading ip lists after WAF has
+// already reloaded would leave WAF on the new rules and ip lists/rate
+// limits on the old ones. That residual window requires a config file
+// that already passed full validation to then fail purely on a
+// downstream component's own rebuild, which config.Load's Validate call
+// is designed to rule out before reloadOnce ever touches a live
+// component — see the config package's Validate for what's checked
+// (including, since this feature, ip_lists.geo.db_path's existence).
+func reloadOnce(configPath string, wafEngine *waf.Engine, ipFilter *ipfilter.Filter, rateLimiter *ratelimit.Limiter) error {
+	newCfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	if wafEngine != nil {
+		if err := wafEngine.Reload(newCfg.WAF.RulesFile); err != nil {
+			return fmt.Errorf("reload waf rules: %w", err)
+		}
+	}
+	if err := ipFilter.Reload(newCfg.IPLists); err != nil {
+		return fmt.Errorf("reload ip lists: %w", err)
+	}
+	rateLimiter.Reload(newCfg.RateLimit)
+
+	return nil
 }

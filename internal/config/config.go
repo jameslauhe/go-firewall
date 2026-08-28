@@ -238,6 +238,9 @@ func (c *Config) Validate() error {
 		if c.IPLists.Geo.DBPath == "" {
 			return fmt.Errorf("ip_lists.geo: db_path is required when geo.enabled is true")
 		}
+		if _, err := os.Stat(c.IPLists.Geo.DBPath); err != nil {
+			return fmt.Errorf("ip_lists.geo.db_path: %w", err)
+		}
 		for _, cc := range c.IPLists.Geo.AllowCountries {
 			if len(cc) != 2 || strings.ToUpper(cc) != cc {
 				return fmt.Errorf("ip_lists.geo.allow_countries: %q is not a valid uppercase ISO 3166-1 alpha-2 code", cc)

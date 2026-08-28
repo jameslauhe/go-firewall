@@ -36,6 +36,7 @@ type shardedLimiter struct {
 	idleTTL time.Duration
 	stopCh  chan struct{}
 	stopped sync.Once
+	done    chan struct{} // closed once evictLoop actually returns; tests use this to confirm Stop() didn't just signal but was observed
 }
 
 func newShardedLimiter(rps float64, burst int, idleTTL time.Duration) *shardedLimiter {
@@ -45,6 +46,7 @@ func newShardedLimiter(rps float64, burst int, idleTTL time.Duration) *shardedLi
 		burst:   burst,
 		idleTTL: idleTTL,
 		stopCh:  make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	for i := range sl.shards {
 		sl.shards[i] = &shard{buckets: make(map[netip.Addr]*bucketEntry)}
@@ -76,6 +78,7 @@ func (sl *shardedLimiter) allowAt(ip netip.Addr, now time.Time) bool {
 }
 
 func (sl *shardedLimiter) evictLoop() {
+	defer close(sl.done)
 	interval := sl.idleTTL / 2
 	if interval <= 0 {
 		interval = time.Minute

@@ -1,3 +1,10 @@
+# Sending SIGHUP to a running process reloads this file's waf.rules_file,
+# ip_lists (including geo), and rate_limit without a restart or dropping
+# connections. Admin-dashboard edits to ip_lists/WAF rules (see admin
+# below) are preserved across a SIGHUP reload — only the base values from
+# this file are replaced. Everything else (listen, upstreams, admin,
+# metrics) requires a restart to change.
+
 listen:
   - address: "0.0.0.0:8443"
     tls:

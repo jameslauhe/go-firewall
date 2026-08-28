@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jameslauhe/go-firewall/internal/geoip/geoiptest"
 )
 
 func writeTempConfig(t *testing.T, contents string) string {
@@ -116,7 +119,7 @@ ip_lists:
     enabled: true
     allow_countries: ["SG"]
 `, true},
-		{"geo lowercase country code rejected", `
+		{"geo enabled with nonexistent db_path", `
 listen:
   - address: "0.0.0.0:8080"
 upstreams:
@@ -124,8 +127,8 @@ upstreams:
 ip_lists:
   geo:
     enabled: true
-    db_path: "/tmp/does-not-matter.mmdb"
-    allow_countries: ["sg"]
+    db_path: "/tmp/does-not-exist-anywhere.mmdb"
+    allow_countries: ["SG"]
 `, true},
 		{"rate limit enabled with zero rps", `
 listen:
@@ -177,5 +180,46 @@ totally_unknown_field: true
 func TestLoad_MissingFile(t *testing.T) {
 	if _, err := Load("/nonexistent/path/config.yaml"); err == nil {
 		t.Fatal("expected error for missing config file, got nil")
+	}
+}
+
+func geoConfigYAML(dbPath string, allowCountries ...string) string {
+	countries := ""
+	for i, c := range allowCountries {
+		if i > 0 {
+			countries += ", "
+		}
+		countries += fmt.Sprintf("%q", c)
+	}
+	return fmt.Sprintf(`
+listen:
+  - address: "0.0.0.0:8080"
+upstreams:
+  addresses: ["http://127.0.0.1:9999"]
+ip_lists:
+  geo:
+    enabled: true
+    db_path: %q
+    allow_countries: [%s]
+`, dbPath, countries)
+}
+
+func TestLoad_GeoLowercaseCountryCodeRejected(t *testing.T) {
+	dbPath := geoiptest.BuildMMDB(t, map[string]string{"203.0.113.0/24": "SG"})
+	path := writeTempConfig(t, geoConfigYAML(dbPath, "sg"))
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for a lowercase country code")
+	}
+}
+
+func TestLoad_GeoValidConfigWithRealDB(t *testing.T) {
+	dbPath := geoiptest.BuildMMDB(t, map[string]string{"203.0.113.0/24": "SG"})
+	path := writeTempConfig(t, geoConfigYAML(dbPath, "SG"))
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if !cfg.IPLists.Geo.Enabled || cfg.IPLists.Geo.DBPath != dbPath {
+		t.Errorf("unexpected geo config: %+v", cfg.IPLists.Geo)
 	}
 }

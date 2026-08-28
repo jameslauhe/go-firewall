@@ -100,3 +100,61 @@ func TestMiddleware_Disabled(t *testing.T) {
 		}
 	}
 }
+
+func TestLimiter_Reload_AppliesNewThresholds(t *testing.T) {
+	l := New(rateLimitConfig(1, 2))
+	defer l.Stop()
+	handler := newTestHandler(l)
+
+	// Exhaust the original burst of 2.
+	doRequest(t, handler, "/", "1.2.3.4:1111")
+	doRequest(t, handler, "/", "1.2.3.4:1111")
+	if code := doRequest(t, handler, "/", "1.2.3.4:1111"); code != http.StatusTooManyRequests {
+		t.Fatalf("expected burst to be exhausted before reload, got %d", code)
+	}
+
+	l.Reload(rateLimitConfig(100, 100))
+
+	// A fresh limiter state means a fresh bucket for this IP too.
+	if code := doRequest(t, handler, "/", "1.2.3.4:1111"); code != http.StatusOK {
+		t.Errorf("expected request to succeed under the new, looser limit after reload, got %d", code)
+	}
+}
+
+func TestLimiter_Reload_DisablesRateLimiting(t *testing.T) {
+	l := New(rateLimitConfig(1, 1))
+	defer l.Stop()
+	handler := newTestHandler(l)
+
+	doRequest(t, handler, "/", "1.2.3.4:1111")
+	if code := doRequest(t, handler, "/", "1.2.3.4:1111"); code != http.StatusTooManyRequests {
+		t.Fatalf("expected burst to be exhausted before reload, got %d", code)
+	}
+
+	l.Reload(config.RateLimitConfig{Enabled: false})
+
+	for i := 0; i < 10; i++ {
+		if code := doRequest(t, handler, "/", "1.2.3.4:1111"); code != http.StatusOK {
+			t.Errorf("request %d after reload-to-disabled: status = %d, want 200", i, code)
+		}
+	}
+}
+
+func TestLimiter_Reload_StopsOldEvictionGoroutine(t *testing.T) {
+	l := New(rateLimitConfig(10, 10))
+	defer l.Stop()
+
+	oldState := l.state.Load()
+	if oldState.def.done == nil {
+		t.Fatal("test assumption broken: shardedLimiter.done was not initialized")
+	}
+
+	l.Reload(rateLimitConfig(20, 20))
+
+	select {
+	case <-oldState.def.done:
+		// evictLoop actually exited, not just that Stop() was called.
+	case <-time.After(2 * time.Second):
+		t.Fatal("old limiter's eviction goroutine did not exit after Reload")
+	}
+}
