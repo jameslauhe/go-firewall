@@ -17,6 +17,14 @@ upstreams:
   idle_conn_timeout: "90s"
   max_idle_conns_per_host: 100
 
+client_ip:
+  # CIDRs of upstream proxies/load balancers allowed to set
+  # X-Forwarded-For. Leave empty (the default) if go-firewall is the true
+  # first hop — then only the raw TCP peer address is ever trusted, and
+  # X-Forwarded-For is ignored entirely. Only set this if go-firewall sits
+  # behind something else that terminates the client connection.
+  trusted_proxies: []
+
 ip_lists:
   allow: []            # empty = allow all (deny list is authoritative)
   deny:

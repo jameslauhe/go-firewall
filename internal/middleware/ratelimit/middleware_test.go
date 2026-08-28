@@ -23,7 +23,7 @@ func newTestHandler(l *Limiter) http.Handler {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return mw.Chain(next, mw.AttachRecorder, l.Middleware())
+	return mw.Chain(next, mw.AttachRecorder, mw.ResolveClientIP(nil), l.Middleware())
 }
 
 func doRequest(t *testing.T, handler http.Handler, path, remoteAddr string) int {

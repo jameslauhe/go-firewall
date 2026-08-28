@@ -1,6 +1,8 @@
-// Package ipfilter implements the first pipeline stage: CIDR allow/deny
-// matching and optional geo-IP allow-listing.
-package ipfilter
+// Package netmatch provides CIDR-set matching shared by anything that
+// needs to test an IP against a list of prefixes — the ipfilter
+// allow/deny stage and the trusted-proxy check used to resolve client IPs
+// from X-Forwarded-For.
+package netmatch
 
 import (
 	"fmt"
@@ -66,7 +68,7 @@ func NewMatcher(cidrs []string) (Matcher, error) {
 	for _, c := range cidrs {
 		p, err := netip.ParsePrefix(c)
 		if err != nil {
-			return nil, fmt.Errorf("ipfilter: invalid CIDR %q: %w", c, err)
+			return nil, fmt.Errorf("netmatch: invalid CIDR %q: %w", c, err)
 		}
 		prefixes = append(prefixes, p)
 	}
@@ -81,7 +83,7 @@ func NewMatcher(cidrs []string) (Matcher, error) {
 	}
 	set, err := b.IPSet()
 	if err != nil {
-		return nil, fmt.Errorf("ipfilter: build IP set: %w", err)
+		return nil, fmt.Errorf("netmatch: build IP set: %w", err)
 	}
 	return &netipxMatcher{set: set}, nil
 }

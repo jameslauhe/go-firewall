@@ -10,14 +10,15 @@ import (
 	"github.com/jameslauhe/go-firewall/internal/config"
 	"github.com/jameslauhe/go-firewall/internal/geoip"
 	mw "github.com/jameslauhe/go-firewall/internal/middleware"
+	"github.com/jameslauhe/go-firewall/internal/netmatch"
 )
 
-// listState pairs a compiled Matcher with the raw CIDR strings it was
-// built from, so the admin API can list the current contents without
+// listState pairs a compiled netmatch.Matcher with the raw CIDR strings it
+// was built from, so the admin API can list the current contents without
 // needing to decompile a Matcher back into strings.
 type listState struct {
 	cidrs   []string
-	matcher Matcher
+	matcher netmatch.Matcher
 }
 
 // Filter is the first pipeline stage: CIDR allow/deny matching, optionally
@@ -65,7 +66,7 @@ func New(cfg config.IPListConfig) (*Filter, error) {
 }
 
 func newListState(cidrs []string) (*listState, error) {
-	m, err := NewMatcher(cidrs)
+	m, err := netmatch.NewMatcher(cidrs)
 	if err != nil {
 		return nil, err
 	}
@@ -164,24 +165,31 @@ func removeCIDR(p *atomic.Pointer[listState], cidr string) (bool, error) {
 	}
 }
 
-// Middleware returns the http middleware enforcing this Filter. It must be
-// the outermost filtering stage (cheapest checks first).
+// Middleware returns the http middleware enforcing this Filter. It must run
+// after mw.ResolveClientIP (which resolves and records the real client IP,
+// honoring trusted-proxy X-Forwarded-For if configured) so every request
+// is checked against the same IP the access log and rate limiter see.
 func (f *Filter) Middleware() mw.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip, err := mw.ClientIP(r)
-			if err != nil {
-				if rec, ok := mw.RecorderFrom(r.Context()); ok {
-					rec.SetBlocked(mw.BlockReasonIPDeny)
-				}
+			rec, ok := mw.RecorderFrom(r.Context())
+			if !ok {
+				// No Recorder means mw.AttachRecorder/mw.ResolveClientIP
+				// weren't wired ahead of this middleware — fail closed
+				// rather than silently skip IP filtering.
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+
+			ip := rec.ClientIP()
+			if !ip.IsValid() {
+				rec.SetBlocked(mw.BlockReasonIPDeny)
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
 
 			if ok, reason := f.Allowed(ip); !ok {
-				if rec, ok2 := mw.RecorderFrom(r.Context()); ok2 {
-					rec.SetBlocked(reason)
-				}
+				rec.SetBlocked(reason)
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}

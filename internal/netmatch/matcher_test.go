@@ -1,4 +1,4 @@
-package ipfilter
+package netmatch
 
 import (
 	"fmt"

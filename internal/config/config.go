@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Listen    []ListenConfig  `yaml:"listen"`
 	Upstreams UpstreamConfig  `yaml:"upstreams"`
+	ClientIP  ClientIPConfig  `yaml:"client_ip"`
 	IPLists   IPListConfig    `yaml:"ip_lists"`
 	Admin     AdminConfig     `yaml:"admin"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
@@ -22,6 +23,18 @@ type Config struct {
 	Log       LogConfig       `yaml:"log"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
 	Shutdown  ShutdownConfig  `yaml:"shutdown"`
+}
+
+// ClientIPConfig controls how the real client IP is resolved. Empty
+// TrustedProxies (the default) means every request's client IP is taken
+// directly from the raw TCP peer — X-Forwarded-For is never trusted.
+type ClientIPConfig struct {
+	// TrustedProxies lists CIDRs of upstream proxies/load balancers
+	// allowed to set X-Forwarded-For. When the raw TCP peer's address is
+	// in this list, the real client IP is resolved by walking
+	// X-Forwarded-For from the right for the first entry that is itself
+	// not in this list; otherwise (or if unset) the raw peer is used.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type ListenConfig struct {
@@ -212,6 +225,9 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := validateCIDRs("client_ip.trusted_proxies", c.ClientIP.TrustedProxies); err != nil {
+		return err
+	}
 	if err := validateCIDRs("ip_lists.allow", c.IPLists.Allow); err != nil {
 		return err
 	}

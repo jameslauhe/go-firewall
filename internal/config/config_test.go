@@ -90,6 +90,22 @@ upstreams:
 ip_lists:
   deny: ["203.0.113.0/24"]
 `, false},
+		{"valid trusted proxy cidr", `
+listen:
+  - address: "0.0.0.0:8080"
+upstreams:
+  addresses: ["http://127.0.0.1:9999"]
+client_ip:
+  trusted_proxies: ["10.0.0.0/8"]
+`, false},
+		{"invalid trusted proxy cidr", `
+listen:
+  - address: "0.0.0.0:8080"
+upstreams:
+  addresses: ["http://127.0.0.1:9999"]
+client_ip:
+  trusted_proxies: ["not-a-cidr"]
+`, true},
 		{"geo enabled without db_path", `
 listen:
   - address: "0.0.0.0:8080"

@@ -67,6 +67,9 @@ func (a *AccessLog) Recent(limit int, outcome, reason string) []Entry {
 	})
 }
 
+// Middleware must run after mw.ResolveClientIP so the logged client_ip
+// reflects the resolved IP (honoring trusted-proxy X-Forwarded-For if
+// configured), not just the raw RemoteAddr.
 func (a *AccessLog) Middleware() mw.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,10 +91,9 @@ func (a *AccessLog) Middleware() mw.Middleware {
 				snap = rec.Snapshot()
 			}
 
-			ip, ipErr := mw.ClientIP(r)
 			clientIP := ""
-			if ipErr == nil {
-				clientIP = ip.String()
+			if snap.ClientIP.IsValid() {
+				clientIP = snap.ClientIP.String()
 			}
 
 			entry := Entry{

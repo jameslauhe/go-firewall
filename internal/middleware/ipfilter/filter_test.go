@@ -107,15 +107,17 @@ func TestFilter_Middleware(t *testing.T) {
 		nextCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := f.Middleware()(next)
+	// f.Middleware() reads the resolved client IP off the Recorder, so it
+	// must sit behind mw.AttachRecorder + mw.ResolveClientIP in the chain,
+	// exactly as it's wired in production.
+	handler := mw.Chain(next, mw.AttachRecorder, mw.ResolveClientIP(nil), f.Middleware())
 
 	t.Run("denied IP never reaches next handler", func(t *testing.T) {
 		nextCalled = false
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.RemoteAddr = "203.0.113.5:12345"
 		rec := httptest.NewRecorder()
-		reqCtx := mw.WithRecorder(req.Context(), mw.NewRecorder("test-id"))
-		handler.ServeHTTP(rec, req.WithContext(reqCtx))
+		handler.ServeHTTP(rec, req)
 
 		if nextCalled {
 			t.Error("expected next handler not to be called for denied IP")

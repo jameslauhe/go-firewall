@@ -74,6 +74,11 @@ func (l *Limiter) limiterFor(path string) *shardedLimiter {
 	return l.def
 }
 
+// Middleware must run after mw.ResolveClientIP, since it buckets by the
+// Recorder's resolved client IP rather than re-parsing RemoteAddr itself —
+// this keeps rate limiting, IP filtering, and access logging all keyed to
+// the same IP even when trusted-proxy X-Forwarded-For resolution is in
+// play.
 func (l *Limiter) Middleware() mw.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,19 +87,21 @@ func (l *Limiter) Middleware() mw.Middleware {
 				return
 			}
 
-			ip, err := mw.ClientIP(r)
-			if err != nil {
-				if rec, ok := mw.RecorderFrom(r.Context()); ok {
-					rec.SetBlocked(mw.BlockReasonRateLimit)
-				}
+			rec, ok := mw.RecorderFrom(r.Context())
+			if !ok {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+
+			ip := rec.ClientIP()
+			if !ip.IsValid() {
+				rec.SetBlocked(mw.BlockReasonRateLimit)
 				w.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
 
 			if !l.limiterFor(r.URL.Path).Allow(ip) {
-				if rec, ok := mw.RecorderFrom(r.Context()); ok {
-					rec.SetBlocked(mw.BlockReasonRateLimit)
-				}
+				rec.SetBlocked(mw.BlockReasonRateLimit)
 				w.WriteHeader(http.StatusTooManyRequests)
 				return
 			}

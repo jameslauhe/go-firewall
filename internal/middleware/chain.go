@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/netip"
 	"sync"
 )
 
@@ -48,6 +49,7 @@ const (
 // reads the same pointer's fields back after ServeHTTP returns.
 type Recorder struct {
 	mu                  sync.Mutex
+	clientIP            netip.Addr
 	outcome             Outcome
 	blockReason         BlockReason
 	wafRuleID           int
@@ -67,6 +69,25 @@ func NewRecorder(requestID string) *Recorder {
 // mutated afterward.
 func (r *Recorder) RequestID() string {
 	return r.requestID
+}
+
+// SetClientIP records the resolved client IP (see ResolveClientIP in
+// clientip.go), which — unlike RequestID — is mutated once after
+// construction, so reading it needs the lock too; use ClientIP(), not a
+// bare field read.
+func (r *Recorder) SetClientIP(ip netip.Addr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clientIP = ip
+}
+
+// ClientIP returns the resolved client IP recorded by ResolveClientIP. It
+// is the zero (invalid) netip.Addr if no Recorder has set one yet — check
+// with ip.IsValid() before relying on it.
+func (r *Recorder) ClientIP() netip.Addr {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.clientIP
 }
 
 func (r *Recorder) SetBlocked(reason BlockReason) {
@@ -102,6 +123,7 @@ func (r *Recorder) SetUpstreamErrorReason(reason string) {
 
 // Snapshot is a point-in-time, race-free copy of a Recorder's fields.
 type Snapshot struct {
+	ClientIP            netip.Addr
 	Outcome             Outcome
 	BlockReason         BlockReason
 	WAFRuleID           int
@@ -116,6 +138,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return Snapshot{
+		ClientIP:            r.clientIP,
 		Outcome:             r.outcome,
 		BlockReason:         r.blockReason,
 		WAFRuleID:           r.wafRuleID,

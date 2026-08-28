@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync"
 	"testing"
 )
@@ -95,6 +96,45 @@ func TestRecorder_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			rec.SetBlocked(BlockReasonRateLimit)
+			_ = rec.Snapshot()
+		}()
+	}
+	wg.Wait() // must complete without the race detector flagging anything
+}
+
+func TestRecorder_ClientIP_DefaultsToInvalid(t *testing.T) {
+	rec := NewRecorder("req-6")
+	if rec.ClientIP().IsValid() {
+		t.Error("expected a fresh Recorder's ClientIP to be invalid until SetClientIP is called")
+	}
+	if rec.Snapshot().ClientIP.IsValid() {
+		t.Error("expected Snapshot().ClientIP to also be invalid before SetClientIP")
+	}
+}
+
+func TestRecorder_SetClientIP_RoundTrip(t *testing.T) {
+	rec := NewRecorder("req-7")
+	ip := netip.MustParseAddr("198.51.100.7")
+	rec.SetClientIP(ip)
+
+	if got := rec.ClientIP(); got != ip {
+		t.Errorf("ClientIP() = %v, want %v", got, ip)
+	}
+	if got := rec.Snapshot().ClientIP; got != ip {
+		t.Errorf("Snapshot().ClientIP = %v, want %v", got, ip)
+	}
+}
+
+func TestRecorder_ClientIP_ConcurrentAccess(t *testing.T) {
+	rec := NewRecorder("req-8")
+	ip := netip.MustParseAddr("10.0.0.1")
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec.SetClientIP(ip)
+			_ = rec.ClientIP()
 			_ = rec.Snapshot()
 		}()
 	}

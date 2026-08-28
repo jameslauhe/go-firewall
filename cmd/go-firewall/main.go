@@ -20,6 +20,7 @@ import (
 	"github.com/jameslauhe/go-firewall/internal/middleware/ipfilter"
 	"github.com/jameslauhe/go-firewall/internal/middleware/ratelimit"
 	"github.com/jameslauhe/go-firewall/internal/middleware/waf"
+	"github.com/jameslauhe/go-firewall/internal/netmatch"
 	"github.com/jameslauhe/go-firewall/internal/proxy"
 	"github.com/jameslauhe/go-firewall/internal/server"
 	"github.com/jameslauhe/go-firewall/internal/version"
@@ -70,8 +71,14 @@ func run(cfg *config.Config) error {
 
 	m := metrics.New(cfg.Metrics.Path, rateLimiter.ActiveBuckets)
 
+	trustedProxies, err := netmatch.NewMatcher(cfg.ClientIP.TrustedProxies)
+	if err != nil {
+		return err
+	}
+
 	mws := []mw.Middleware{
 		mw.AttachRecorder,
+		mw.ResolveClientIP(trustedProxies),
 		accessLog.Middleware(),
 		m.Middleware(),
 		ipFilter.Middleware(),

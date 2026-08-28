@@ -33,7 +33,7 @@ func TestAccessLog_RecordsAllowedRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
-	handler := mw.Chain(next, mw.AttachRecorder, a.Middleware())
+	handler := mw.Chain(next, mw.AttachRecorder, mw.ResolveClientIP(nil), a.Middleware())
 
 	req := httptest.NewRequest(http.MethodGet, "/hello?x=1", nil)
 	req.RemoteAddr = "1.2.3.4:5555"
@@ -74,7 +74,7 @@ func TestAccessLog_RecordsBlockedRequest(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusForbidden)
 	})
-	handler := mw.Chain(next, mw.AttachRecorder, a.Middleware())
+	handler := mw.Chain(next, mw.AttachRecorder, mw.ResolveClientIP(nil), a.Middleware())
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.RemoteAddr = "5.6.7.8:1111"
@@ -109,7 +109,7 @@ func TestAccessLog_JSONSchema(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := mw.Chain(next, mw.AttachRecorder, a.Middleware())
+	handler := mw.Chain(next, mw.AttachRecorder, mw.ResolveClientIP(nil), a.Middleware())
 
 	req := httptest.NewRequest(http.MethodGet, "/x?a=1", nil)
 	req.RemoteAddr = "1.1.1.1:1"
